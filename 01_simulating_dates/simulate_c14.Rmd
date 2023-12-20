@@ -1,0 +1,272 @@
+---
+title: "Simulating radiocarbon dates"
+author: "Isak Roalkvam"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r, warning=FALSE, message=FALSE}
+# Uncomment and run to install packages
+# install.packages("readxl")
+# install.packages("sf")
+# install.packages("ggplot2")
+# install.packages("here")
+# install.packages("stringr")
+
+
+# Load packages
+library(readxl) # For reading in Excel files
+library(sf) # For handling vector data
+library(ggplot2) # Plotting functions
+library(here) # Relative path handling
+library(stringr) # For handling string data
+```
+
+```{r, warning=FALSE, message=FALSE, results=FALSE}
+# Read in data
+c14_data <- read_excel(here("data/Europe_NearEast_NorthAfrica_14C_Database.xlsx"))
+eucoast <- st_read(here("data/europe_coast_epsg3035/europe_coast_epsg3035.shp"))
+```
+
+## Spatial filtering of radiocarbon data
+
+Start by clipping ^14^C-dates from the database to the polygon that limits the study area.
+
+```{r, fig.width = 8, fig.height = 8, fig.align="center"}
+# Make a sf point feature version of the radiocarbon data by specifying 
+# coordinate columns and corresponding coordinate reference system (CRS).
+c14_points <- st_as_sf(c14_data, coords = c("LONGITUDE", "LATITUDE"),
+                       crs = 4326)
+
+# Reproject the points to the same CRS as the polygon feature (EPSG:3035)
+c14_points <- st_transform(c14_points, st_crs(eucoast))
+
+# Select only point features that fall within the polygon
+c14_filtered <- st_filter(c14_points, eucoast)
+
+# Plot for inspection
+ggplot() +
+  geom_sf(data = eucoast) +
+  geom_sf(data = c14_points, col = "red", size = 0.2) +
+  geom_sf(data = c14_filtered, size = 0.2) +
+  theme_bw()
+```
+
+Red points in the map are filtered out, which reduces the number of radiocarbon dates from `r nrow(c14_points)` to `r nrow(c14_filtered)`. The next step is to generate a random number of radiocarbon dates that matches the number of dates in the filtered version of the data called `c14_filtered`.
+
+```{r}
+# Find sample size for the dates to be simulated (wrapping the assignment in 
+# parentheses prints the results to console)
+(sample_size <- nrow(c14_filtered))
+
+# Find the lowest 14C age
+(minage <- min(c14_filtered$C14AGE))
+# Find the highest 14C age
+(maxage <- max(c14_filtered$C14AGE))
+
+# Find the date range for which the dates are to be simulated
+date_range <- minage:maxage
+```
+
+## Exponential distribution of simulated dates
+
+The dates are to be distributed exponentially, with an increasing number of dates towards the present. The rate parameter defines the growth factor, also known as the rate of change, for the exponential function. This has been chosen here somewhat arbitrarily by manually testing and inspecting the resulting distribution:
+
+```{r, fig.width = 5, fig.height = 4, fig.align="center"}
+# Exponential density distribution with a rate of 0.0004
+expfit <- dexp(date_range, rate = 0.0004)
+
+# Plot for inspection
+ggplot() +
+  geom_line(aes(date_range, expfit)) +
+  scale_x_reverse() +
+  labs(x = "Age BP", y = "Probability",
+       title = "Exponential function for sampling ages") +
+  theme_classic()
+```
+
+This distribution can then be used for sampling ^14^C ages.
+
+```{r, fig.width = 5, fig.height = 4, fig.align="center"}
+# Draw sample (with replacement) of ages using the exponential model 
+exp_sample <- sample(date_range, size = sample_size,
+                     replace = TRUE, prob = expfit)
+
+# Plot for inspection
+ggplot() +
+  geom_histogram(aes(exp_sample), fill = "darkgrey", binwidth = 100) +
+  scale_x_reverse() +
+  labs(x = "Age BP", y = "Count", title = "Distribution of sampled ages") +
+  theme_classic()
+```
+
+## Randomly generated points
+
+This sample of ages is then to be assigned to a sample of random points generated within the polygon representing the study area. Below, these are generated with a uniform probability of occurrence within the polygon feature, but different kinds of spatial models determining for example the degree of clustering of the points could be used. There is also a column for country in the real radiocarbon data which could also be used for determining the distribution of points within polygons representing these countries. Finally, although slightly more advanced, a spatially explicit model for the distribution of ages could also be implemented to simulate for example the spread of some phenomenon through the study region (see for example the package `spatstat`).
+
+```{r, fig.width = 10, fig.height = 10, fig.align="center"}
+# Sample random points within the study area polygon, the number of which
+# equates to the number of dates in the filtered radiocarbon data
+rnd_pts <- st_sample(eucoast, sample_size) 
+
+# Make the point feature an object of class sf
+rnd_pts <- st_as_sf(rnd_pts)
+# Append the randomly generated 14C ages to the points
+rnd_pts$age <- exp_sample
+
+ggplot() +
+  geom_sf(data = eucoast) +
+  geom_sf(data = rnd_pts, size = 0.00000001) +
+  theme_bw()
+```
+
+```{r}
+# Print out the first few rows of the randomly generated points with
+# corresponding dates
+head(rnd_pts)
+
+```
+The first few lines here tell us that we have a collection of simple feature objects of the type POINT with the CRS ETRS89-extended / LAEA Europe (which is has EPSG code 3035). After this the first sixs rows in the data is printed, where the column `x` gives the XY coordinates of each point (also called the geometry column for the `sf` package) and the column `age` gives the simulated ^14^C-age.
+
+Next we are going to add some additional fictitious data to this simulated dataset.
+
+```{r}
+# Print out the names of the columns in the original radiocarbon data
+# to identify what columns could be of interest to recreate for the simulated
+# data. 
+names(c14_filtered)
+```
+
+Several of the columns in the original data could be of interest to recreate for the simulated data. Here we are going to focus on the errors for the radiocarbon dates (`C14STD` in the original data), the laboratory and sample IDs (`LABNR` in the original data), as well as the columns for latitude and longitude.
+
+We'll start with the errors. To see how these can best be simulated we'll start by determining whether there is some temporal structure in the way the errors are distributed in the original data.
+
+## Error estimates for the simulated ^14^C-dates
+
+```{r}
+# Test the correlation between age and error in the original data using 
+# Pearson's R
+cor.test(c14_filtered$C14AGE, c14_filtered$C14STD)
+```
+
+This tells us that there is a highly significant, but fairly low linear correlation between age and error of 0.227.
+To further explore this, we'll fit and visualise a linear regression model using this data.
+
+```{r}
+# Fit a linear regression model (as a note, C14STD is here the dependent variable and C14AGE
+# is the explanatory or independent variable)
+linear_model <- lm(C14STD ~ C14AGE, data = c14_filtered) 
+
+# Print a summary of the model
+summary(linear_model)
+```
+
+The regression coefficient for `C14AGE` is statistically significant and tells us that the age of the sample has a statistically significant ability to help us predict the error corresponding to a given ^14^C age. The coefficient estimate of 0.006 tells us that on average there is a 0.006 increase in the error estimate for each 1 point increase in age. However, the R-squared values also tells us that the linear regression model only captures c. 5 % (0.051) of the variation in the distribution of errors and consequently that age is a significant, but still fairly poor predictor for error. This can also be demonstrated by visualising the model:
+
+```{r, results=FALSE, warning = FALSE, fig.width = 5, fig.height = 5, fig.align = "center"}
+# Plot for inspection
+ggplot(c14_filtered, aes(C14AGE, C14STD)) +
+  ggtitle("Scatter plot of radiocarbon ages and errors\nin the original data") +
+  geom_point(pch = 16) +
+  geom_smooth(formula = y ~ x, method = "lm", col = "red") +
+  theme_bw()
+```
+
+Given the fairly low ability for age to predict the errors we won't bother with using a model to generate errors for the simulated data set. Although we won't explore that further here, it is possible that other factors could be included in a multiple regression model to better capture the error estimates. From the original data it is possible that for example different labs, different locations in space or different sample material correspond with the magnitude of the error estimates.
+
+Here, however, we will therefore simply draw the errors from the original data with a uniform probability of drawing any individual error:
+
+```{r}
+# Draw errors uniformly from the real data with replacement and assign these to 
+# a column in the simulated data set. (For some reason a few of the errors in 
+# the original data is provided with decimal precision, so these are rounded 
+# off).
+rnd_pts$error <- round(sample(c14_filtered$C14STD, size = nrow(rnd_pts),
+                           replace = TRUE))
+```
+
+## Sample IDs for the simulated data
+
+Next we will generate some fictitious sample IDs for the simulated dates. We'll start by using the function `str_split_fixed()` from `stringr` to retrieve information from the original data to build on.
+
+```{r}
+# This creates a data frame with one column holding the lab abbreviations and the other 
+# the numerical identifier for each date. These are generally separated by a hyphen in
+# the original data, so this is used for the splitting of the values in the column LABNR
+# in the original data. As this is not always the case, this does not give perfect results,
+# but is good enough for its intended use here.
+labcodes <- as.data.frame(str_split_fixed(c14_data$LABNR, "-", 2))
+
+# Then we'll find the 10 most common lab abbreviations for use with the 
+# simulated data
+labsabb <- sort(table(labcodes$V1), decreasing = TRUE)[1:10]
+
+# Then create probabilities based on the frequency of occurrence for each of the 
+# 10 most common labs. 
+labsabb <- labsabb/sum(labsabb)
+
+# We then draw a sample of lab names, weighting the probability of drawing each
+# by their frequency of occurrence in the original data
+abbs <- sample(names(labsabb), nrow(rnd_pts), replace = TRUE, prob = labsabb)
+
+# Generate random numbers to append to the lab abbreviations (not using 
+# replacement, replace = FALSE, to avoid duplicates). 
+numids <- sample(1:max(as.numeric(labcodes$V2), na.rm = TRUE),
+                 nrow(rnd_pts), replace = FALSE)
+```
+The warning here reflects that entries in the original data does not always follow the "lab abbreviation-numerical ID" notation, leading some numerical values to be coerced to NA with `as.numeric()`. Setting `na.rm = TRUE` in the call for `max()` means that NAs are ignored and do not cause any problems when finding the highest numerical value for the sample IDs.
+
+```{r}
+# Finally, combine the lab names and id numbers, seperated by a hyphen, 
+# in a column in the simulated data
+rnd_pts$lab_id <- paste0(abbs, "-", numids)
+
+# Print the first few rows of the simulated data for inspection
+head(rnd_pts)
+```
+
+## Finding latitude and longitude for the simulated data
+
+The final thing we will do is create columns for latitude and longitude of the simulated data. In this way the data can easily be saved and distributed as a CSV file instead of a shapefile or geopackage, which is easier to use with a spreadsheet program such as Excel.
+
+To find the lat/long values we first need to re-project the data to the geographical (as opposed to projected) CRS: WGS 84 - World Geodetic System 1984 (EPSG:4326).
+
+```{r}
+# Reproject to WGS 84 to find lat/long
+pts_wgs84 <- st_transform(rnd_pts, "EPSG:4326")
+```
+
+Before we retrieve the coordinates of the points it should be noted here that the `sf` package defines two-dimensional coordinates as XY. As latitude equates to northing (y-axis) and longitude to easting (x-axis), latitude is the second coordinate and longitude the first in the geometry column of two-dimensional `sf` objects. Thus, the convention of denoting geographical coordinates as lat/long and projected coordinates as XY could cause confusion, as the software here stores the geographical coordinates in the sequence long/lat. From https://r-spatial.github.io/sf/articles/sf1.html: "two-dimensional points refer to x and y, easting and northing, or longitude and latitude, we refer to them as XY".
+
+```{r}
+# Retrieve the second and first coordinate of each point and assign them to
+# the columns latitude and longitude
+pts_wgs84$latitude <- st_coordinates(pts_wgs84)[, 2]
+pts_wgs84$longitude <- st_coordinates(pts_wgs84)[, 1]
+```
+
+## Final inspection and saving of the simulated data
+
+As we have created columns for latitude and longitude we will here use the function `st_drop_geometry()` as the geometry column used by `sf` is not needed any more. We'll also rearrange the columns slightly and then print the first few rows of the data to check that we have everything we need.
+
+```{r}
+# Remove the sf geometry column and rearrange the columns so that sample IDs come first
+pts_wgs84 <- st_drop_geometry(pts_wgs84)[, c(3, 1:2, 4:5)]
+
+# Print the first six rows
+head(pts_wgs84)
+```
+
+Finally, we'll save the simulated data as a CSV file.
+
+```{r}
+# Save the data as a CSV file in the data folder
+write.csv(pts_wgs84, here("data/simulated_dates.csv"), row.names = FALSE)
+```
+
+ 

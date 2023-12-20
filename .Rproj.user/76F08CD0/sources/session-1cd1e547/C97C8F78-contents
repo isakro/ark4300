@@ -1,0 +1,206 @@
+---
+title: "Simulating dates for vegetation data"
+author: "Isak Roalkvam"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This RMarkdown document simulates new spatial point data and radiocarbon dates for the vegetation data provided in Mjærum, A., Loftsgarden, K. and Solheim, S. 2022 Human-vegetation dynamics in Holocene south-eastern Norway based on radiocarbon dated charcoal from archaeological excavations. _The Holocene_ 32(7):690--702. DOI: https://doi.org/10.1177/09596836221088242. This follows the same structure as that used in the document under 01_simulating_dates distributed with the same repository as this document.
+
+Note that there were some errors and inconsistencies in the data provided with the paper. One of the points representing a sample from the site Molteberg (^14^C sample ID Tua-5668) had an erroneous coordinate for longitude of 43780 in the original data. Furthermore, 36 samples, one from the site Gråvåhøi and the rest from Langfonne, had values of both latitude and longitude set to zero. Ten of the samples from the site Hov had coordinates placing them well into the Atlantic Ocean (lat = 66.7, long = 5.7) along with one sample each from the sites Steinbu and Stråpå (both samples with lat = 68.476, long = 6.513). Finally, two samples are from the site denoted vestvJfp 29 located on Vestvågøy, Lofoten in Northern Norway (lat = 68.217, long = 13.794), which is well outside the scope of the original paper. All of these samples are omitted in the code below.
+
+```{r}
+# Uncomment and run to install packages
+# install.packages("sf")
+# install.packages("ggplot2")
+# install.packages("here")
+# install.packages("stringr")
+# install.packages("rnaturalearth")
+
+# Load packages
+library(sf) # For handling vector data
+library(ggplot2) # Plotting functions
+library(here) # Relative path handling
+library(stringr) # For handling string data
+library(rnaturalearth) # Provides spatial data
+```
+
+```{r}
+# Read in data
+veg_data <- read.csv(here("data/sj-csv-1-hol-10.1177_09596836221088242.csv"))
+
+# Omit points with lat/long of 0/0. The indexing done with square brackets 
+# returns rows that are TRUE and drops those that are FALSE. The logical 
+# expression within the parenthesis returns TRUE if both latitude and longitude 
+# is equal to 0, and FALSE if not. The exclamation mark in front of the 
+# parenthesis reverses this. 
+veg_data <- veg_data[!(veg_data$LATITUDE == 0 & veg_data$LONGITUDE == 0),]
+
+# Remove the sample from Molteberg with a longitude of 43780
+veg_data <- veg_data[!(veg_data$LONGITUDE == "43780"),]
+
+# Remove the 10 samples from lat = 66.7 and long = 5.7
+veg_data <- veg_data[!(veg_data$LATITUDE == 66.7 & veg_data$LONGITUDE == 5.7),]
+
+# Remove the two samples from lat = 68.476, long = 6.513
+veg_data <- veg_data[!(veg_data$LATITUDE == 68.476 & veg_data$LONGITUDE == 6.513),]
+
+# Remove the two samples from lat = 68.217, long = 13.794
+veg_data <- veg_data[!(veg_data$LATITUDE == 68.217 & veg_data$LONGITUDE == 13.794),]
+
+# Define as sf point feature
+veg_points <- st_as_sf(veg_data, coords = c("LONGITUDE", "LATITUDE"),
+                       crs = 4326)
+
+
+```
+
+## Plot data and create random sample of points
+
+We will now create a map to ensure that the data looks reasonable. This time we will download vector data from the public domain map datasets available from https://www.naturalearthdata.com/ using the R package `rnaturalearth`. This data is stored in a temporary folder that is emptied when the current R session is ended.
+
+```{r, fig.width = 6, fig.height = 6, fig.align="center"}
+# Download vector data 
+countries <- ne_download(scale = "large", category = "cultural")
+# Subset for Norway and Sweden
+studyarea <- countries[countries$SOVEREIGNT %in% c("Norway", "Sweden"),]
+
+# Create bounding box around points for zooming the plot
+pts_bbox <- st_bbox(veg_points)
+
+ggplot() +
+  geom_sf(data = studyarea) +
+  geom_sf(data = veg_points, size = 0.7) +
+  # Zoom, adjusting the x values slightly 
+  coord_sf(xlim = c(pts_bbox$xmin - 1, pts_bbox$xmax + 1),
+           ylim = c(pts_bbox$ymin, pts_bbox$ymax)) +
+  theme_bw()
+```
+
+As with the radiocarbon data, we can now generate new points within the spatial extent of the points. We'll simply use the bounding box identified above for this (execute the code `?st_bbox` to see the help pages for function that generates the bounding box).
+
+```{r, fig.width = 6, fig.height = 6, fig.align="center"}
+# Crop the downloaded vector data to the bounding box of the sample points
+studyarea_cropped <- st_crop(st_geometry(studyarea), pts_bbox)
+
+# Make the sample size an object that can be used below
+sample_size <- nrow(veg_points)
+
+# Generate randomly distributed points within the cropped polygon
+rnd_points <- st_as_sf(st_sample(studyarea_cropped, size = sample_size))
+
+# Plot for inspection, using the uncropped polygon and the same zoom as before
+ggplot() +
+  geom_sf(data = studyarea) +
+  geom_sf(data = rnd_points, col = "red", size = 0.7) +
+  coord_sf(xlim = c(pts_bbox$xmin - 1, pts_bbox$xmax + 1),
+           ylim = c(pts_bbox$ymin, pts_bbox$ymax)) +
+  theme_bw()
+```
+
+## Generate random data for simulated points
+
+As in the previous document we'll use an exponential function for generating the random dates.
+
+```{r, fig.width = 5, fig.height = 4, fig.align="center"}
+# Find the lowest 14C age
+(minage <- min(veg_points$C14AGE))
+# Find the highest 14C age
+(maxage <- max(veg_points$C14AGE))
+
+# Find the date range for which the dates are to be simulated
+date_range <- minage:maxage
+
+# Exponential function, adjusting the rate somewhat from the version in the
+# last simulation
+expfit <- dexp(date_range, rate = 0.0009)
+
+# Plot for inspection
+ggplot() +
+  geom_line(aes(date_range, expfit)) +
+  scale_x_reverse() +
+  labs(x = "Age BP", y = "Probability",
+       title = "Exponential function for sampling ages") +
+  theme_bw()
+
+```
+
+```{r, fig.width = 5, fig.height = 4, fig.align="center"}
+# Draw sample (with replacement) of ages using the exponential model 
+exp_sample <- sample(date_range, size = sample_size,
+                     replace = TRUE, prob = expfit)
+
+# Assign ages to randomly generated points
+rnd_points$age <- exp_sample
+
+# Plot for inspection
+ggplot() +
+  geom_histogram(aes(exp_sample), fill = "darkgrey", binwidth = 25) +
+  scale_x_reverse() +
+  labs(x = "Age BP", y = "Count", title = "Distribution of sampled ages") +
+  theme_bw()
+```
+
+We'll do the same as before and sample errors uniformly from the original data.
+
+```{r}
+rnd_points$error <- sample(veg_points$C14_STANDA, size = sample_size,
+                           replace = TRUE)
+```
+
+And follow the same procedure as before for generating fictitious sample IDs.
+
+```{r}
+labcodes <- as.data.frame(str_split_fixed(veg_points$LAB_REF, "-", 2))
+labsabb <- sort(table(labcodes$V1), decreasing = TRUE)[1:10]
+labsabb <- labsabb/sum(labsabb)
+abbs <- sample(names(labsabb), sample_size, replace = TRUE, prob = labsabb)
+numids <- sample(1:max(as.numeric(labcodes$V2), na.rm = TRUE),
+                 sample_size, replace = FALSE)
+```
+This gives the same warning as we got previously.
+
+```{r}
+rnd_points$lab_id <- paste0(abbs, "-", numids)
+```
+
+We'll then find the lat/long values for these points as well. These are already in the geographical CRS WGS 84 (EPSG:4326), which we can double check with the function `st_crs()`. 
+```{r}
+# Print CRS, subsetting for the EPSG code
+st_crs(rnd_points)$epsg
+```
+
+As before we need to be aware of the lat/long-XY gotcha to assign the coordinates correctly.
+```{r}
+rnd_points$latitude <- st_coordinates(rnd_points)[, 2]
+rnd_points$longitude <- st_coordinates(rnd_points)[, 1]
+```
+ 
+Now that we have the coordinates we can remove the sf geometry column and check that we have the data of interest.
+
+```{r}
+rnd_points <- st_drop_geometry(rnd_points)
+str(rnd_points)
+```
+
+We'll then assign the original data of interest back to the randomly generated data.
+```{r}
+rnd_points$c14_taxon <- veg_points$C14_TAXON_
+rnd_points$species_tr <- veg_points$SPECIES_TR
+rnd_points$bioregion <- veg_points$Bioregion
+
+# Rearrange columns
+rnd_points <- rnd_points[, c(3, 1:2, 6:8, 4:5)]
+
+# Print to console to inspect again
+str(rnd_points)
+```
+
+And finally, save the resulting dataset to a CSV file.
+
+```{r}
+write.csv(rnd_points, here("data/simulated_vegetation.csv"), row.names = FALSE)
+```
